@@ -1,85 +1,94 @@
-import dotenv from 'dotenv';
-import { Request, Response } from 'express';
 import { google } from 'googleapis';
 import User from '../models/user.model';
 import jwt from 'jsonwebtoken';
 import { oauth2Client } from '../utils/oauth2Client';
 import axios from 'axios';
+import logger from '../utils/logger';
 
-dotenv.config();
+export class AuthService {
+  async generateAuthUrl(): Promise<string> {
+    logger.info('Generating Google OAuth URL');
+    return oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: [
+        'https://www.googleapis.com/auth/calendar',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'https://www.googleapis.com/auth/userinfo.profile',
+      ],
+      prompt: 'consent',
+    });
+  }
 
-export const googleAuth = (req: Request, res: Response): void => {
-  const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: [
-      'https://www.googleapis.com/auth/calendar',
-      'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile',
-    ],
-    prompt: 'consent',
-  });
-  res.redirect(authUrl);
-};
-
-export const googleAuthCallback = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  try {
-    const { code } = req.query;
-    if (!code) {
-      throw new Error('Authorization code not provided by Google.');
-    }
-    const { tokens } = await oauth2Client.getToken(code as string);
-
+  async handleGoogleCallback(code: string): Promise<string> {
+    logger.info('Handling Google OAuth callback');
+    const { tokens } = await oauth2Client.getToken(code);
     if (!tokens || !tokens.access_token) {
+      logger.error('Failed to obtain access token from Google');
       throw new Error('Failed to obtain access token from Google.');
     }
+
     const accessToken = tokens.access_token;
     oauth2Client.setCredentials(tokens);
 
-    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const userInfo = await this.fetchUserInfo(accessToken);
+    const user = await this.findOrCreateUser(userInfo, tokens);
+    logger.info(`User authenticated: ${user.email}`);
 
-    const userInfoResponse = await axios.get(
+    return this.generateJwtToken(user._id as string);
+  }
+
+  private async fetchUserInfo(
+    accessToken: string
+  ): Promise<{ email: string; name: string }> {
+    logger.info('Fetching user info from Google');
+    const response = await axios.get(
       'https://www.googleapis.com/oauth2/v2/userinfo',
       {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       }
     );
-    if (!userInfoResponse.data || !userInfoResponse.data.email) {
+
+    if (!response.data || !response.data.email) {
+      logger.error('Failed to retrieve user information from Google');
       throw new Error('Failed to retrieve user information from Google.');
     }
-    const { email, name } = userInfoResponse.data;
-    if (!email) {
-      throw new Error('Google account did not provide an email address.');
-    }
-    let user = await User.findOne({ email });
+
+    const { email, name } = response.data;
+    logger.info(`User info fetched: ${email}`);
+    return { email, name };
+  }
+
+  private async findOrCreateUser(
+    userInfo: { email: string; name: string },
+    tokens: any
+  ) {
+    logger.info(`Finding or creating user with email: ${userInfo.email}`);
+    let user = await User.findOne({ email: userInfo.email });
 
     if (!user) {
       user = new User({
-        email,
-        name,
+        email: userInfo.email,
+        name: userInfo.name,
         googleId: tokens.id_token,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
       });
       await user.save();
+      logger.info(`New user created: ${user.email}`);
     } else {
       user.accessToken = tokens.access_token || '';
       user.refreshToken = tokens.refresh_token || '';
       await user.save();
+      logger.info(`User tokens updated: ${user.email}`);
     }
 
-    const jwtToken = jwt.sign({ id: user._id }, process.env.JWT_KEY as string, {
+    return user;
+  }
+
+  private generateJwtToken(userId: string): string {
+    logger.info(`Generating JWT for user: ${userId}`);
+    return jwt.sign({ id: userId }, process.env.JWT_KEY as string, {
       expiresIn: '1d',
     });
-    res.json({ token: jwtToken });
-  } catch (err: any) {
-    console.error('Error in Google OAuth callback:', err.message);
-    res
-      .status(500)
-      .json({ message: 'Authentication failed', error: err.message });
   }
-};
+}

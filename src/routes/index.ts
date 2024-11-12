@@ -1,15 +1,21 @@
 import express from 'express';
 const router = express.Router();
 import { createEvent, updateEvent, deleteEvent, getEvents } from './events';
-import { googleAuth, googleAuthCallback } from '../services/auth.service';
+import { AuthController } from '../controllers/auth.controller';
+
+const authController = new AuthController();
 
 router.use('/api/create', createEvent);
 router.use('/api/update', updateEvent);
 router.use('/api/get', getEvents);
 router.use('/api/delete', deleteEvent);
 
-router.get('/api/auth/google', googleAuth);
-router.get('/api/auth/google/callback', googleAuthCallback);
+router.get('/api/auth/google', (req, res) =>
+  authController.googleAuth(req, res)
+);
+router.get('/api/auth/google/callback', (req, res) =>
+  authController.googleAuthCallback(req, res)
+);
 
 router.get('/health', (req, res) => {
   const data = {

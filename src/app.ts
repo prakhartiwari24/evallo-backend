@@ -5,6 +5,7 @@ import http from 'http';
 import logger from './utils/logger';
 import MongoDatabase from './config/mongodb';
 import { router } from './routes';
+import cors from 'cors';
 
 dotenv.config();
 
@@ -14,6 +15,7 @@ class App {
   private readonly app: express.Application;
   constructor() {
     this.app = express();
+    this.app.use(cors());
     this.mongoDatabase = new MongoDatabase();
     this.server = http.createServer(this.app);
 

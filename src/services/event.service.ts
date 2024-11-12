@@ -1,162 +1,149 @@
 import { google } from 'googleapis';
 import Event, { IEvent } from '../models/event.model';
 import User from '../models/user.model';
-import { validationResult } from 'express-validator';
-import { Response } from 'express';
+import logger from '../utils/logger';
 
-const addEventToGoogleCalendar = async (userId: string, event: IEvent) => {
-  const user = await User.findById(userId);
-  if (!user) throw new Error('User not found');
-
-  const oauth2Client = new google.auth.OAuth2();
-
-  oauth2Client.setCredentials({
-    access_token: user.accessToken,
-    refresh_token: user.refreshToken,
-  });
-
-  const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-  const googleEvent = {
-    summary: event.title,
-    description: event.description,
-    start: {
-      dateTime: new Date(event.date).toISOString(),
-      timeZone: 'Asia/Kolkata',
-    },
-    end: {
-      dateTime: new Date(
-        new Date(event.date).getTime() + event.duration * 60 * 60 * 1000
-      ).toISOString(),
-      timeZone: 'Asia/Kolkata',
-    },
-    attendees: event.participants.map((email) => ({ email })),
-  };
-
-  const response = await calendar.events.insert({
-    calendarId: 'primary',
-    requestBody: googleEvent,
-  });
-  event.googleCalendarId = response.data.id || '';
-  await event.save();
-};
-
-export const createEvent = async (req: any, res: Response): Promise<void> => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    res.status(400).json({ errors: errors.array() });
-    return;
-  }
-  try {
-    const event = new Event({ ...req.body, userId: req.user.id });
-    await event.save();
-    await addEventToGoogleCalendar(req.user.id, event);
-    res.status(201).json(event);
-  } catch (err) {
-    res.status(500).json({ message: 'Server error' });
-  }
-};
-
-export const getEvents = async (req: any, res: Response): Promise<void> => {
-  try {
-    const events = await Event.find({ userId: req.user.id });
-    res.status(200).json(events);
-  } catch (error) {
-    res.status(500).json({ message: 'Server error' });
-  }
-};
-
-export const updateEvent = async (req: any, res: Response): Promise<void> => {
-  const { id } = req.params;
-  try {
-    const event = await Event.findByIdAndUpdate(
-      id,
-      { ...req.body },
-      { new: true }
-    );
-    if (!event) {
-      res.status(404).json({ message: 'Event not found' });
-      return;
+export class EventService {
+  async addEventToGoogleCalendar(userId: string, event: IEvent): Promise<void> {
+    logger.info(`Adding event to Google Calendar for user ${userId}`);
+    const user = await User.findById(userId);
+    if (!user) {
+      logger.error(`User not found for ID: ${userId}`);
+      throw new Error('User not found');
     }
-    await updateEventInGoogleCalendar(req.user.id, event);
-    res.status(200).json(event);
-  } catch (error) {
-    res.status(500).json({ message: 'Server error' });
+
+    const oauth2Client = this.createOAuthClient(user);
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+    const googleEvent = this.createGoogleEventObject(event);
+    const response = await calendar.events.insert({
+      calendarId: 'primary',
+      requestBody: googleEvent,
+    });
+
+    event.googleCalendarId = response.data.id || '';
+    await event.save();
+    logger.info(
+      `Event added to Google Calendar with ID ${event.googleCalendarId}`
+    );
   }
-};
 
-const updateEventInGoogleCalendar = async (userId: string, event: IEvent) => {
-  const user = await User.findById(userId);
+  async updateEventInGoogleCalendar(
+    userId: string,
+    event: IEvent
+  ): Promise<void> {
+    if (!event.googleCalendarId) return;
 
-  if (!user) throw new Error('User not found');
+    logger.info(
+      `Updating event in Google Calendar for user ${userId} and event ID ${event.googleCalendarId}`
+    );
+    const user = await User.findById(userId);
+    if (!user) {
+      logger.error(`User not found for ID: ${userId}`);
+      throw new Error('User not found');
+    }
 
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({
-    access_token: user.accessToken || '',
-    refresh_token: user.refreshToken || '',
-  });
+    const oauth2Client = this.createOAuthClient(user);
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-  const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    const googleEvent = this.createGoogleEventObject(event);
+    await calendar.events.update({
+      calendarId: 'primary',
+      eventId: event.googleCalendarId,
+      requestBody: googleEvent,
+    });
+    logger.info(
+      `Event updated in Google Calendar with ID ${event.googleCalendarId}`
+    );
+  }
 
-  if (!event.googleCalendarId) return;
+  async deleteEventFromGoogleCalendar(
+    userId: string,
+    googleCalendarId: string
+  ): Promise<void> {
+    logger.info(
+      `Deleting event from Google Calendar for user ${userId} and event ID ${googleCalendarId}`
+    );
+    const user = await User.findById(userId);
+    if (!user) {
+      logger.error(`User not found for ID: ${userId}`);
+      throw new Error('User not found');
+    }
 
-  const googleEvent = {
-    summary: event.title,
-    description: event.description,
-    start: {
-      dateTime: new Date(event.date).toISOString(),
-      timeZone: 'Asia/Kolkata',
-    },
-    end: {
-      dateTime: new Date(
-        new Date(event.date).getTime() + event.duration * 60 * 60 * 1000
-      ).toISOString(),
-      timeZone: 'Asia/Kolkata',
-    },
-    attendees: event.participants.map((email) => ({ email })),
-  };
+    const oauth2Client = this.createOAuthClient(user);
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-  await calendar.events.update({
-    calendarId: 'primary',
-    eventId: event.googleCalendarId,
-    requestBody: googleEvent,
-  });
-};
+    await calendar.events.delete({
+      calendarId: 'primary',
+      eventId: googleCalendarId,
+    });
+    logger.info(
+      `Event deleted from Google Calendar with ID ${googleCalendarId}`
+    );
+  }
 
-export const deleteEvent = async (req: any, res: Response) => {
-  const { id } = await req.params;
-  try {
+  async createEvent(eventData: any, userId: string): Promise<IEvent> {
+    logger.info(`Creating new event for user ${userId}`);
+    const event = new Event({ ...eventData, userId });
+    await event.save();
+    await this.addEventToGoogleCalendar(userId, event);
+    logger.info(`Event created with ID ${event._id}`);
+    return event;
+  }
+
+  async updateEvent(
+    id: string,
+    eventData: any,
+    userId: string
+  ): Promise<IEvent | null> {
+    logger.info(`Updating event for user ${userId} with event ID ${id}`);
+    const event = await Event.findByIdAndUpdate(id, eventData, { new: true });
+    if (!event) {
+      logger.warn(`Event not found with ID ${id}`);
+      return null;
+    }
+    await this.updateEventInGoogleCalendar(userId, event);
+    logger.info(`Event updated with ID ${event._id}`);
+    return event;
+  }
+
+  async deleteEvent(id: string, userId: string): Promise<void> {
+    logger.info(`Deleting event with ID ${id} for user ${userId}`);
     const event = await Event.findByIdAndDelete(id);
     if (!event) {
-      res.status(404).json({
-        message: 'Event not found',
-      });
-      return;
+      logger.warn(`Event not found with ID ${id}`);
+      throw new Error('Event not found');
     }
     if (event.googleCalendarId) {
-      await deleteEventFromGoogleCalendar(req.user.id, event.googleCalendarId);
+      await this.deleteEventFromGoogleCalendar(userId, event.googleCalendarId);
     }
-    res.status(204).send();
-  } catch (error) {
-    res.status(500).json({ messgae: 'Server Error' });
+    logger.info(`Event deleted with ID ${id}`);
   }
-};
 
-const deleteEventFromGoogleCalendar = async (
-  userId: string,
-  googleCalendarId: string
-) => {
-  const user = await User.findById(userId);
-  if (!user) throw new Error('User not found');
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({
-    access_token: user.accessToken || '',
-    refresh_token: user.refreshToken || '',
-  });
+  private createOAuthClient(user: any) {
+    const oauth2Client = new google.auth.OAuth2();
+    oauth2Client.setCredentials({
+      access_token: user.accessToken || '',
+      refresh_token: user.refreshToken || '',
+    });
+    return oauth2Client;
+  }
 
-  const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-
-  await calendar.events.delete({
-    calendarId: 'primary',
-    eventId: googleCalendarId,
-  });
-};
+  private createGoogleEventObject(event: IEvent) {
+    return {
+      summary: event.title,
+      description: event.description,
+      start: {
+        dateTime: new Date(event.date).toISOString(),
+        timeZone: 'Asia/Kolkata',
+      },
+      end: {
+        dateTime: new Date(
+          new Date(event.date).getTime() + event.duration * 60 * 60 * 1000
+        ).toISOString(),
+        timeZone: 'Asia/Kolkata',
+      },
+      attendees: event.participants.map((email) => ({ email })),
+    };
+  }
+}
